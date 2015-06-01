@@ -25,10 +25,10 @@ type PauseReader struct {
 	spins   int
 }
 
-// NewPauseReader returns a PauseReader wrapping `r` with `wait` milliseconds
+// New returns a PauseReader wrapping `r` with `wait` milliseconds
 // of base wait time, `wait` will exponentially increase every `c` checks
 // PauseReader is still paused.
-func NewPauseReader(r io.Reader, wait, c int) *PauseReader {
+func New(r io.Reader, wait, c int) *PauseReader {
 	return &PauseReader{
 		r:       r,
 		state:   false,
