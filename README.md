@@ -1,0 +1,2 @@
+# pausereader
+Pausable io.Reader
