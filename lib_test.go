@@ -1,82 +1,67 @@
 package pausereader
 
 import (
-	"bytes"
-	"fmt"
-	"io"
-	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	. "gopkg.in/check.v1"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) { TestingT(t) }
-
-type PauseSuite struct{}
-
-var _ = Suite(&PauseSuite{})
-
-func (s *PauseSuite) SetUpSuite(c *C) {}
-
-func (s *PauseSuite) TestInMemoryReader(c *C) {
-	var buf bytes.Buffer
-	fmt.Fprintln(&buf, "Hello, playground")
-
-	var pr = NewPauseReader(&buf, 100, 2)
-
-	pr.Pause()
-	c.Log(".Pause")
-	go func() {
-		t := time.Now()
-		time.Sleep(5 * time.Second)
-		c.Log(".Resume")
-		c.Logf("backoff=%d", pr.backoff)
-		pr.Resume()
-		c.Logf("elapsed=%s", time.Since(t))
-	}()
-
-	var out bytes.Buffer
-	_, err := io.CopyN(&out, pr, 20)
-	c.Assert(err, Equals, io.EOF)
-
-	c.Logf("buf=%q", out.String())
-	c.Logf("spins=%d", pr.spins)
-	c.Assert(pr.spins <= 200, Equals, true)
+type oneByteReader struct {
+	buf []byte
+	pos int
+	mtx sync.Mutex
 }
 
-func (s *PauseSuite) TestHttpReader(c *C) {
-	res, err := http.Get("https://github.com/toqueteos/webbrowser/archive/master.zip")
-	c.Assert(err, IsNil)
-	defer res.Body.Close()
+func (r *oneByteReader) Read(buf []byte) (n int, err error) {
+	r.mtx.Lock()
+	buf[0] = r.buf[r.pos]
+	r.pos++
+	r.mtx.Unlock()
+	return 1, nil
+}
 
-	var pr = NewPauseReader(res.Body, 10, 2)
+func TestInMemoryReader(t *testing.T) {
+	buf := &oneByteReader{buf: []byte{1, 2, 3, 4, 5, 6, 7, 8}}
 
-	pr.Pause()
-	c.Log(".Pause")
-	go func() {
-		t := time.Now()
-		time.Sleep(2 * time.Second)
-		c.Log(".Resume")
-		c.Logf("backoff=%d", pr.backoff)
-		pr.Resume()
-		c.Logf("elapsed=%s", time.Since(t))
+	r := New(buf)
+	r.Pause()
 
-		t = time.Now()
-		pr.Pause()
-		time.Sleep(2 * time.Second)
-		c.Log(".Resume")
-		c.Logf("backoff=%d", pr.backoff)
-		pr.Resume()
-		c.Logf("elapsed=%s", time.Since(t))
-	}()
+	counter := uint32(0)
 
-	var out bytes.Buffer
-	_, err = io.Copy(&out, pr)
-	c.Assert(err, IsNil)
+	for i := 0; i < len(buf.buf); i++ {
+		go read(t, r, &counter)
+	}
 
-	c.Logf("buf=%q", out.Len())
-	c.Logf("spins=%d", pr.spins)
-	c.Assert(pr.spins <= 200, Equals, true)
+	time.Sleep(200 * time.Millisecond)
+	if counter != 0 {
+		t.Fatalf("wrong state: expected counter=0, got counter=%d", counter)
+	}
+
+	r.Resume()
+	time.Sleep(200 * time.Millisecond)
+	if r.IsPaused() {
+		t.Fatal("wrong PausableReader state: expected paused=false, got paused=true")
+	}
+
+	expectedCounter := uint32(len(buf.buf))
+	gotCounter := atomic.LoadUint32(&counter)
+	if gotCounter != expectedCounter {
+		t.Fatalf("wrong state: expected counter=%d, got counter=%d", expectedCounter, gotCounter)
+	}
+}
+
+func read(t *testing.T, r PausableReader, counter *uint32) {
+	buf := make([]byte, 1)
+	n, err := r.Read(buf)
+	if buf[0] == 0 {
+		t.Fatal("wrong state: expected value != 0")
+	}
+	if n != 1 {
+		t.Fatalf("wrong state: expected n=1, got n=%d", n)
+	}
+	if err != nil {
+		t.Fatalf("wrong state: expected error=nil, got error=%v", err)
+	}
+	atomic.AddUint32(counter, 1)
 }

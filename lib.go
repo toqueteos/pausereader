@@ -3,62 +3,51 @@ package pausereader
 import (
 	"io"
 	"sync"
-	"time"
+	"sync/atomic"
 )
 
-type Resumer interface {
+type PausableReader interface {
+	io.Reader
 	Pause()
 	Resume()
-	Running() bool
+	IsPaused() bool
 }
 
 // PauseReader wraps an `io.Reader` and allows to effectively pause all .Read
-// calls to it, basically returning `(0, nil)`.
+// calls to it, turn it a blocking operation.
 type PauseReader struct {
-	sync.RWMutex
-	r       io.Reader
-	state   bool
-	base    int // Base wait time in milliseconds
-	checks  int // Number of sleeps to increase backoff
-	c       int
-	backoff int // Exponential backoff
-	spins   int
+	wg    sync.WaitGroup
+	r     io.Reader
+	state uint32
 }
 
-// New returns a PauseReader wrapping `r` with `wait` milliseconds
-// of base wait time, `wait` will exponentially increase every `c` checks
-// PauseReader is still paused.
-func New(r io.Reader, wait, c int) *PauseReader {
+// New returns a PauseReader wrapping `r`.
+func New(r io.Reader) *PauseReader {
 	return &PauseReader{
-		r:       r,
-		state:   false,
-		base:    wait,
-		checks:  c,
-		backoff: 1,
+		r:     r,
+		state: 1,
 	}
 }
-func (p *PauseReader) Pause()        { p.Lock(); defer p.Unlock(); p.state = false }
-func (p *PauseReader) Resume()       { p.Lock(); defer p.Unlock(); p.c = 0; p.backoff = 1; p.state = true }
-func (p *PauseReader) Running() bool { return p.state }
-func (p *PauseReader) Read(buf []byte) (n int, err error) {
-	p.RLock()
-	var state = p.state
-	var t = p.base * p.backoff
-	p.RUnlock()
-	if state {
-		return p.r.Read(buf)
-	} else {
-		p.Lock()
-		p.spins++
-		if p.c < p.checks {
-			p.c++
-		} else {
-			p.c = 0
-			p.backoff *= 2
-		}
-		p.Unlock()
-		time.Sleep(time.Duration(t) * time.Millisecond)
-		buf = nil
-		return 0, nil
+func (r *PauseReader) Pause() {
+	if atomic.CompareAndSwapUint32(&r.state, 1, 0) {
+		r.wg.Add(1)
 	}
+}
+
+func (r *PauseReader) Resume() {
+	if atomic.CompareAndSwapUint32(&r.state, 0, 1) {
+		r.wg.Done()
+	}
+}
+
+func (r *PauseReader) IsPaused() bool {
+	return atomic.LoadUint32(&r.state) == 0
+}
+
+func (r *PauseReader) Read(buf []byte) (n int, err error) {
+	if r.IsPaused() {
+		r.wg.Wait()
+	}
+
+	return r.r.Read(buf)
 }
